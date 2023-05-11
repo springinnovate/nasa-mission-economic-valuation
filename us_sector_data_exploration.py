@@ -19,12 +19,10 @@ def main():
             table = pandas.merge(
                 table, local_table, left_index=True, right_index=True,
                 suffixes=('', '_dup'))
-    print(table.columns)
     table = table.rename(columns={'Unnamed: 1': 'Industry'})
     table = table.filter(regex='^(?!.*_dup$)')
     table = table.set_index(table.columns[1])
     table = table.drop('Line', axis=1)
-
 
     co2_emissions_table = pandas.read_csv(
         './data/annual-co2-emissions-per-country.csv')
@@ -35,6 +33,11 @@ def main():
         index='Entity', columns='Year', values=co2_emissions_table.columns[3])
     print(co2_emissions_table)
     print(table)
+
+    years = list(sorted(table.columns))
+    print(years)
+
+
 
 if __name__ == '__main__':
     main()
