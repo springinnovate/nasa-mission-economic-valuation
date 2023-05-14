@@ -1,20 +1,12 @@
 from tensorflow.keras import backend as K
-import csv
 import os
-import json
 import numpy
-from sklearn.linear_model import RidgeCV
-from sklearn.metrics import r2_score
-from sklearn.linear_model import Ridge
-from sklearn.preprocessing import StandardScaler
 import pandas
 import matplotlib.pyplot as plt
-from sklearn.svm import SVR
 import tensorflow as tf
-from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, BatchNormalization, Input, concatenate
 from tensorflow.keras.models import Model
-from tensorflow.keras.callbacks import EarlyStopping, CSVLogger
+from tensorflow.keras.callbacks import CSVLogger
 from sklearn.model_selection import train_test_split
 
 
@@ -25,9 +17,23 @@ def r2_loss(y_true, y_pred):
     return tf.maximum(K.epsilon(), 1 - r2)
 
 
+def r2_weighted(y_true, y_pred):
+    try:
+        ss_res = K.sum(K.square(y_true - y_pred))
+        ss_tot = K.sum(K.square(y_true - K.mean(y_true)))
+        r2 = 1 - ss_res/(ss_tot + K.epsilon())
+        return tf.maximum(K.epsilon(), 1 - r2)
+        # weight = 1 / K.abs(y_true - 1)  # assign higher weight to values closer to 1
+        # return K.mean(r2 * weight, axis=-1)
+    except AttributeError:
+        ss_res = numpy.sum((y_true - y_pred)**2)
+        ss_tot = numpy.sum((y_true - numpy.mean(y_true))**2)
+        r2 = 1 - ss_res/(ss_tot + numpy.finfo(numpy.float32).eps)
+        return max(numpy.finfo(numpy.float32).eps, 1 - r2)
+
+
 def main():
     """Entry point."""
-
     # Load US gross output by industry
     us_gross_output_1997_2022 = './data/US Gross Output by Industry 1997-2022.csv'
     us_gross_output_1960_1997 = './data/US Gross Output by Industry 1960-1997.csv'
@@ -103,7 +109,6 @@ def main():
 
     print(len(X_train_swizzle[0]))
 
-    initializer = tf.keras.initializers.glorot_uniform()
     country_lstm_layers = []
     input_layers = []
     for country_name in country_names:
@@ -112,7 +117,8 @@ def main():
         country_lstm_layers.append(BatchNormalization()(LSTM(
             lstm_density, input_shape=(
                 n_continuous_years, 1),
-            kernel_initializer=initializer)(input_layers[-1])))
+            kernel_initializer=tf.keras.initializers.glorot_uniform())(
+                input_layers[-1])))
 
     starting_gdp = Input(shape=(n_industries,))
     input_layers.append(starting_gdp)
@@ -133,16 +139,15 @@ def main():
 
     model.compile(
         #loss='mae',
-        loss=r2_loss,
+        loss=r2_weighted,
         #optimizer=tf.keras.optimizers.Adam(clipnorm=0.5))
         optimizer=tf.keras.optimizers.Adagrad(learning_rate=0.001))
 
-    checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(
-        filepath='model_checkpoint',
-        save_weights_only=True,
-        save_freq='epoch',
-        verbose=1,
-    )
+    # checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(
+    #     filepath='model_checkpoint_{epoch:05d}',
+    #     save_freq='epoch',
+    #     verbose=1,
+    # )
 
     # def r2_analysis(model):
     #     predictions = model.predict(X_test)
@@ -156,12 +161,36 @@ def main():
 
     print(y_train[0])
 
-    model.fit(
-        x=X_train_swizzle, y=y_train, epochs=50000, batch_size=1000000,
-        verbose=1, callbacks=[checkpoint_callback, csv_logger],
-        use_multiprocessing=True, workers=os.cpu_count())
+    os.makedirs('value_tables', exist_ok=True)
+    for stage in range(20):
+        model.fit(
+            x=X_train_swizzle, y=y_train, epochs=100, batch_size=1000000,
+            verbose=1, callbacks=[csv_logger],
+            use_multiprocessing=True, workers=os.cpu_count())
 
-    model.save('my_model')
+        for year_to_analyze in range(1964, 2020):
+            year_index = year_to_analyze-1960
+            base_year_x = [[X[year_index][i]] for i in range(len(X[0]))]
+            reduced_year_x = [
+                [input_array[0]*.1] for input_array in base_year_x]
+            print(reduced_year_x[-2])
+            print(reduced_year_x[-1])
+            print(reduced_year_x[0])
+            reconstructed_model = tf.keras.models.load_model(
+                f'model_{year_to_analyze}_{stage}', compile=False)
+            base_predictions = reconstructed_model.predict(base_year_x)
+            with open(f'value_tables/value_table_model_{stage}.csv', 'w') as value_table:
+                value_table.write('Incremental value of in CO2 reduction')
+                value_table.write(f'proportion of original CO2,' + ','.join(industry_names) + '\n')
+                for percent_reduction in numpy.arange(200, -1, -10) / 100.0:
+                    reduced_year_x = [
+                        [input_array[0]*percent_reduction] for input_array in base_year_x[:-1]] + [base_year_x[-1]]
+                    reduced_predictions = reconstructed_model.predict(reduced_year_x)
+
+                    value = base_predictions[0] - reduced_predictions[0]
+                    print(value)
+
+                    value_table.write(f'{percent_reduction-1},' + ','.join([str(x) for x in value]) + '\n')
 
 
 class CustomCSVLogger(CSVLogger):
@@ -186,7 +215,8 @@ class CustomCSVLogger(CSVLogger):
         with open(self.filename, 'a', newline='') as f:
             predictions = self.model.predict(x=self.X_test)
             try:
-                r2 = r2_score(self.y_test, predictions)
+                #r2 = r2_score(self.y_test, predictions)
+                r2 = 1-r2_weighted(self.y_test, predictions)
             except ValueError:
                 r2 = -99
             loss = logs['loss']
@@ -217,6 +247,7 @@ class CustomCSVLogger(CSVLogger):
 
         os.makedirs('graphs', exist_ok=True)
         plt.savefig(f'graphs/{epoch:06d}.png')
+        plt.close()
 
 
 if __name__ == '__main__':
