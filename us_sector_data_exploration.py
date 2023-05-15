@@ -100,7 +100,9 @@ def main():
         #us_gross_array = us_gross_output_table[year_slice[0]].values.astype(float)
         input_row = co2_country_arrays # + [us_gross_array]
         X.append(input_row)
-        Y.append(us_gross_output_table[year_slice[-1]].values.astype(float))
+        Y.append(
+            us_gross_output_table[year_slice[-1]].values.astype(float)-
+            us_gross_output_table[year_slice[-2]].values.astype(float))
 
     Y = numpy.array(Y)
     X_train, X_test, y_train, y_test = train_test_split(
@@ -121,7 +123,7 @@ def main():
     for country_name in country_names:
         input_layers.append(
             Input(shape=(n_continuous_years, 1)))
-        country_lstm_layers.append(tf.keras.layers.Dropout(rate=0.8)(
+        country_lstm_layers.append(tf.keras.layers.Dropout(rate=0.4)(
             BatchNormalization()(LSTM(
                 lstm_density, input_shape=(
                     n_continuous_years, 1),
@@ -199,7 +201,8 @@ def main():
                         reduced_predictions = model.predict(reduced_year_x)
 
                         value = [
-                            base_predictions[0][i] - reduced_predictions[0][i]
+                            reduced_predictions[0][i]
+                            #base_predictions[0][i] - reduced_predictions[0][i]
                             for i in range(len(base_predictions[0]))]
                         value_table.write(f'{percent_reduction-1},' + ','.join([str(x) for x in value]) + '\n')
             except IndexError:
