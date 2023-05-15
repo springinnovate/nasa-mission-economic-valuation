@@ -73,10 +73,17 @@ def main():
     year_list = list(sorted(us_gross_output_table.columns))
     n_years = len(year_list)
 
-    n_continuous_years = 5
-    n_layers = 5
-    lstm_density = 4
-    dense_density = 32
+    # n_continuous_years = 5
+    # n_layers = 1
+    # lstm_density = 4
+    # dense_density = 32
+
+    n_continuous_years = 10
+    n_layers = 0
+    lstm_density = n_continuous_years
+    dense_density = 3
+    kernel_regular = 0.8
+    learning_rate = 0.0001
 
     # X is the input, i.e. co2 emissions from countries plus the original gdp
     # Y is the output, i.e. gross output from US industries
@@ -84,20 +91,20 @@ def main():
     #X = numpy.empty((n_years-n_continuous_years, n_countries, *n_continuous_years+n_industries, 1))
     Y = [] # numpy.empty((n_years-n_continuous_years, n_industries))
     X = []
-    for start_index in range(0, n_years-n_continuous_years):
+    for start_index in range(1, n_years-n_continuous_years):
         year_slice = year_list[start_index:n_continuous_years+start_index]
         print(f'working on {year_slice}')
 
         co2_slice = co2_emissions_table[year_slice]
         co2_country_arrays = [row.reshape(-1, 1) for row in co2_slice.values]
-        us_gross_array = us_gross_output_table[year_slice[0]].values.astype(float)
-        input_row = co2_country_arrays + [us_gross_array]
+        #us_gross_array = us_gross_output_table[year_slice[0]].values.astype(float)
+        input_row = co2_country_arrays # + [us_gross_array]
         X.append(input_row)
         Y.append(us_gross_output_table[year_slice[-1]].values.astype(float))
 
     Y = numpy.array(Y)
     X_train, X_test, y_train, y_test = train_test_split(
-        X, Y, test_size=0.2, random_state=42)
+        X, Y, test_size=0.1, random_state=42)
 
     X_train_swizzle = [
         [X_train[j][i] for j in range(len(X_train))]
@@ -114,34 +121,43 @@ def main():
     for country_name in country_names:
         input_layers.append(
             Input(shape=(n_continuous_years, 1)))
-        country_lstm_layers.append(BatchNormalization()(LSTM(
-            lstm_density, input_shape=(
-                n_continuous_years, 1),
-            kernel_initializer=tf.keras.initializers.glorot_uniform())(
-                input_layers[-1])))
+        country_lstm_layers.append(tf.keras.layers.Dropout(rate=0.8)(
+            BatchNormalization()(LSTM(
+                lstm_density, input_shape=(
+                    n_continuous_years, 1),
+                kernel_initializer=tf.keras.initializers.glorot_uniform(),
+                activation='linear',
+                kernel_regularizer=tf.keras.regularizers.l2(kernel_regular),
+                )(input_layers[-1]))))
 
-    starting_gdp = Input(shape=(n_industries,))
-    input_layers.append(starting_gdp)
-    merged = concatenate(country_lstm_layers + [starting_gdp])
+    #starting_gdp = Input(shape=(n_industries,))
+    #input_layers.append(starting_gdp)
+    #merged = concatenate(country_lstm_layers + [starting_gdp])
+    merged = concatenate(country_lstm_layers)
 
     #rest_of_layers = BatchNormalization()(merged)
 
     # Define dense layers after the LSTM layers
     for i in range(n_layers):
         merged = Dense(
-            dense_density, activation='linear')(merged)
+            dense_density, activation='linear',
+            kernel_initializer=tf.keras.initializers.glorot_uniform(),
+            kernel_regularizer=tf.keras.regularizers.l2(kernel_regular),)(merged)
 
     # Define output layer
-    output_layer = Dense(n_industries, activation='linear')(merged)
+    output_layer = Dense(
+        n_industries, activation='linear',
+        kernel_initializer=tf.keras.initializers.glorot_uniform())(merged)
 
     model = Model(inputs=input_layers, outputs=output_layer)
 
 
     model.compile(
-        #loss='mae',
-        loss=r2_weighted,
+        loss='mse',
+        #loss=r2_weighted,
         #optimizer=tf.keras.optimizers.Adam(clipnorm=0.5))
-        optimizer=tf.keras.optimizers.Adagrad(learning_rate=0.001))
+        optimizer=tf.keras.optimizers.Adam(lr=learning_rate),)
+        #optimizer=tf.keras.optimizers.Adagrad(learning_rate=learning_rate))
 
     # checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(
     #     filepath='model_checkpoint_{epoch:05d}',
@@ -164,38 +180,35 @@ def main():
     os.makedirs('value_tables', exist_ok=True)
     for stage in range(20):
         model.fit(
-            x=X_train_swizzle, y=y_train, epochs=100, batch_size=1000000,
+            x=X_train_swizzle, y=y_train, epochs=200, batch_size=1000000,
             verbose=1, callbacks=[csv_logger],
             use_multiprocessing=True, workers=os.cpu_count())
 
-        for year_to_analyze in range(1964, 2020):
-            year_index = year_to_analyze-1960
-            base_year_x = [[X[year_index][i]] for i in range(len(X[0]))]
-            reduced_year_x = [
-                [input_array[0]*.1] for input_array in base_year_x]
-            print(reduced_year_x[-2])
-            print(reduced_year_x[-1])
-            print(reduced_year_x[0])
-            reconstructed_model = tf.keras.models.load_model(
-                f'model_{year_to_analyze}_{stage}', compile=False)
-            base_predictions = reconstructed_model.predict(base_year_x)
-            with open(f'value_tables/value_table_model_{stage}.csv', 'w') as value_table:
-                value_table.write('Incremental value of in CO2 reduction')
-                value_table.write(f'proportion of original CO2,' + ','.join(industry_names) + '\n')
-                for percent_reduction in numpy.arange(200, -1, -10) / 100.0:
-                    reduced_year_x = [
-                        [input_array[0]*percent_reduction] for input_array in base_year_x[:-1]] + [base_year_x[-1]]
-                    reduced_predictions = reconstructed_model.predict(reduced_year_x)
+        for year_to_analyze in range(n_continuous_years+1960, 2020):
+            try:
+                year_index = year_to_analyze-1960
+                print(year_index)
+                base_year_x = [[X[year_index][i]] for i in range(len(X[0]))]
+                base_predictions = model.predict(base_year_x)
+                with open(f'value_tables/value_table_model_{stage}_{year_to_analyze}.csv', 'w') as value_table:
+                    value_table.write('Incremental value of in CO2 reduction')
+                    value_table.write(f'proportion of original CO2,' + ','.join([f'"{name}"' for name in industry_names]) + '\n')
+                    for percent_reduction in numpy.arange(10, 201, 10) / 100.0:
+                        reduced_year_x = [
+                            [input_array[0]*percent_reduction] for input_array in base_year_x[:-1]] + [base_year_x[-1]]
+                        reduced_predictions = model.predict(reduced_year_x)
 
-                    value = base_predictions[0] - reduced_predictions[0]
-                    print(value)
-
-                    value_table.write(f'{percent_reduction-1},' + ','.join([str(x) for x in value]) + '\n')
+                        value = [
+                            base_predictions[0][i] - reduced_predictions[0][i]
+                            for i in range(len(base_predictions[0]))]
+                        value_table.write(f'{percent_reduction-1},' + ','.join([str(x) for x in value]) + '\n')
+            except IndexError:
+                continue
 
 
 class CustomCSVLogger(CSVLogger):
     def __init__(self, filename, X_test, y_test, separator=',', append=False):
-        super().__init__(filename, separator=separator, append=append)
+        super().__init__(filename, separator=separator, append=append, )
         # Define your custom headers here
         self.X_test = X_test
         self.y_test = y_test
@@ -246,7 +259,7 @@ class CustomCSVLogger(CSVLogger):
         ax2.tick_params(axis='y', labelcolor='red')
 
         os.makedirs('graphs', exist_ok=True)
-        plt.savefig(f'graphs/{epoch:06d}.png')
+        plt.savefig(f'graphs/{self.epoch:06d}_{r2:.4f}.png')
         plt.close()
 
 
